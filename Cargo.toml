@@ -1,0 +1,11 @@
+[package]
+name = "derive_accessor"
+version = "0.1.0"
+authors = ["loomaclin <loo.maclin@protonmail.com>"]
+
+[dependencies]
+syn = "0.11"
+quote = "0.3"
+
+[lib]
+proc-macro = true

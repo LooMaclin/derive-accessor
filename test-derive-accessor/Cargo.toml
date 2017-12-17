@@ -1,0 +1,7 @@
+[package]
+name = "test-derive-accessor"
+version = "0.1.0"
+authors = ["loomaclin <loo.maclin@protonmail.com>"]
+
+[dependencies]
+derive_accessor = { path = "../" }
