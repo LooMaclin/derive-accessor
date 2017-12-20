@@ -23,7 +23,7 @@ and generates getter methods from raw slice for each field.
 
 Generated code example:
 
-```
+```rust
 
 impl A {
 
