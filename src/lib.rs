@@ -9,6 +9,9 @@ use quote::ToTokens;
 use syn::{MetaItem, Lit};
 use quote::Tokens;
 use syn::Ident;
+use syn::Ty;
+use syn::Field;
+use syn::Path;
 
 #[proc_macro_derive(Accessor)]
 pub fn generate_accessor(input: TokenStream) -> TokenStream {
@@ -33,12 +36,13 @@ fn accessors(ast: &syn::DeriveInput) -> quote::Tokens {
                     quote! {
                         impl #name {
                             #gen
+
                         }
                     }
-                },
+                }
                 _ => panic!("Only syn::VariantData::Struct supported!"),
             }
-        },
+        }
         _ => panic!("Only syn::Body::Struct supported!"),
     }
 }
@@ -47,39 +51,143 @@ struct StructGenerator<'a> {
     fields: &'a [syn::Field]
 }
 
-impl<'a> quote::ToTokens for StructGenerator<'a> {
-    fn to_tokens(&self, tokens: &mut quote::Tokens) {
-        for field in self.fields {
-            let field_name = &field.ident.as_ref().expect("Struct field should have name!");
-            let field_type = &field.ty;
-            if let Some(attribute) = field.attrs.iter().find(|attribute| attribute.name() == "accessor_size") {
-                let field_size = match attribute.value {
-                    MetaItem::NameValue(_, ref literal) => {
-                        match literal {
-                            &Lit::Int(field_size, _) => {
-                                field_size
-                            },
-                            _ => panic!("Only syn::Lit::Int supported!"),
-                        }
-                    },
-                    _ => panic!("Only syn::MetaItem:NameValue supported!"),
-                };
-                let accessor_function_name = Ident::from("get_".to_owned()+field_name.as_ref());
-                tokens.append(
-                    quote! {
-                        const #field_name : u64 = #field_size;
+#[derive(Debug)]
+struct FieldInfo {
+    pub type_name: String,
+    pub explicit_size: Option<usize>,
+    pub field_name: String,
+    pub real_size: Option<usize>,
+}
 
-                        pub fn #accessor_function_name(value: &[u8]) -> #field_type {
-                            1
+fn extract_explicit_size(field: &Field) -> Option<usize> {
+    field
+        .attrs
+        .iter()
+        .find(|attribute| attribute.name() == "explicit_size")
+        .map(|attribute|
+            match attribute.value {
+                MetaItem::NameValue(_, ref literal) => {
+                    match literal {
+                        &Lit::Int(field_size, _) => {
+                            field_size as usize
                         }
-                });
-            } else {
-                panic!("Field {} should have `hp_size` attribute!", field_name);
-            }
+                        _ => panic!("Only syn::Lit::Int supported!"),
+                    }
+                }
+                _ => panic!("Only syn::MetaItem:NameValue supported!"),
+            })
+}
+
+fn extract_ty_name_from_path_ty(path: &Path) -> String {
+    path.segments[0].ident.as_ref().to_string()
+}
+
+fn extract_type_name(ty: &Ty) -> String {
+    match ty {
+        &Ty::Path(_, ref path) => {
+            extract_ty_name_from_path_ty(path)
+        },
+        &Ty::Rptr(_, ref ty) => {
+            extract_type_name(&ty.as_ref().ty)
         }
+        _ => panic!("Only syn::Ty::Path supported: {:#?}", ty),
     }
 }
 
+impl<'a> quote::ToTokens for StructGenerator<'a> {
+    fn to_tokens(&self, tokens: &mut quote::Tokens) {
+        let fields_info: Vec<FieldInfo> =
+            self
+                .fields
+                .iter()
+                .map(|field| {
+                    FieldInfo {
+                        type_name: extract_type_name(&field.ty),
+                        explicit_size: extract_explicit_size(field),
+                        field_name: field.ident.as_ref().expect("Struct field should have name!").as_ref().to_string(),
+                        real_size: None,
+                    }
+                })
+                .map(|item|
+                    FieldInfo {
+                        real_size: Some(match item.type_name.as_ref() {
+                            "u8" => 1,
+                            "u16" => 2,
+                            "u32" => 4,
+                            "u64" => 8,
+                            "str" | "String" => item.explicit_size.expect("For str or String expected explicit size!"),
+                            _ => panic!("This field type not supported: {:#?}", item.type_name),
+                        }),
+                        ..item
+                })
+                .collect();
+        let output_array_size: usize = fields_info.iter().map(|item| item.real_size.unwrap()).sum();
+        let mut elp = 0;
+        let serialzing_fields_tokens: Vec<(Tokens, Tokens)> = fields_info.iter().map(|item| {
+            let field_name = Ident::from(item.field_name.clone());
+            let field_type = Ident::from(item.type_name.clone());
+            let accessor_fn_name = Ident::from("get_".to_string()+field_name.as_ref());
+            match item.type_name.as_ref() {
+                "u8" => {
+                    let res = (
+                    quote!{ result[#elp] = self.#field_name; },
+                    quote!{ pub fn #accessor_fn_name(value: &[u8]) -> #field_type {
+                    use ::byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+                        value[#elp]
+                    }}); elp+=1; res },
+                "u16" => {let res = (
+                    quote!{ BigEndian::write_u16(&mut result[#elp..#elp+2], self.#field_name); },
+                    quote!{ pub fn #accessor_fn_name(value: &[u8]) -> #field_type {
+                    use ::byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+                        BigEndian::read_u16(&value[#elp..#elp+2])
+                    }}); elp+=2; res },
+                "u32" => {let res = (
+                    quote!{ BigEndian::write_u32(&mut result[#elp..#elp+4], self.#field_name); },
+                    quote!{ pub fn #accessor_fn_name(value: &[u8]) -> #field_type {
+                    use ::byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+                        BigEndian::read_u32(&value[#elp..#elp+4])
+                    }}); elp+=4; res },
+                "u64" => {let res = (
+                    quote!{ BigEndian::write_u64(&mut result[#elp..#elp+8], self.#field_name); },
+                    quote!{ pub fn #accessor_fn_name(value: &[u8]) -> #field_type {
+                    use ::byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+                        BigEndian::read_u64(&value[#elp..#elp+8])
+                    }}); elp+=8; res },
+                "str" | "String" => {
+                    let real_size = item.real_size.unwrap();
+                    let res = (
+                        quote!{ result[#elp..#elp+#real_size].copy_from_slice(self.#field_name.as_bytes()); },
+                        quote!{ pub fn #accessor_fn_name<'a>(value: &'a [u8]) -> &'a str {
+                            unsafe { ::std::str::from_utf8_unchecked(&value[#elp..#elp+#real_size]) }
+                        }}
+                    );
+                    elp += real_size;
+                    res
+                }
+                _ => panic!("not supported!"),
+            }
+        }).collect();
+        let serializing_tokens = serialzing_fields_tokens.iter().cloned().fold(Tokens::new(), |mut acc, item| {
+           acc.append(item.0);
+            acc
+        });
+        let getters_tokens = serialzing_fields_tokens.iter().cloned().fold(Tokens::new(), |mut acc, item| {
+            acc.append(item.1);
+            acc
+        });
+        tokens.append(quote!{
+
+            pub fn to_array(&self) -> [u8; #output_array_size] {
+                use ::byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+                let mut result : [u8; #output_array_size] = [0; #output_array_size];
+                #serializing_tokens
+                result
+            }
+
+            #getters_tokens
+        })
+    }
+}
 
 
 #[cfg(test)]

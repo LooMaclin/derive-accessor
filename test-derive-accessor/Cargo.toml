@@ -5,3 +5,4 @@ authors = ["loomaclin <loo.maclin@protonmail.com>"]
 
 [dependencies]
 derive_accessor = { path = "../" }
+byteorder = "1.2.1"
